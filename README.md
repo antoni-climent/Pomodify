@@ -1,15 +1,15 @@
 # ⏳ Pomodoro Timer App
 
-A simple **Pomodoro Timer** built with Python and Tkinter, featuring session tracking with SQLite and desktop notifications for Linux. 📅🔔
+A simple **Pomodoro Timer** built with Python logic and Qt5, featuring session tracking with SQLite and desktop notifications for Linux. 📅🔔
 
 ---
 
 ## 🚀 Features
-- 🎯 Customizable **focus** and **rest** times
+- 🎯 Customizable **focus** and **break** times
 - 📊 **Session history** stored using SQLite
-- 🛑 **Start/Pause/Stop** functionality
-- 🔔 **Desktop notifications** upon session completion
-- 🖥️ Simple and intuitive **Tkinter GUI**
+- 🛑 **Start/Pause/Reset** functionality
+- 🔔 **Desktop notifiactions** upon session completion
+- 🖥️ Simple and intuitive **Qt5 GUI**
 
 ---
 
@@ -54,7 +54,7 @@ python pomodoro.py
 ### 🎨 Interface Overview
 - **Start**: Begin a Pomodoro session
 - **Pause**: Pause the session
-- **Stop**: Stop the session
+- **Restart**: Restarts the session and returns to focus time
 - **Show History**: View past focus times
 
 ---
@@ -62,7 +62,9 @@ python pomodoro.py
 ## 📜 Requirements
 ```txt
 pysqlite3==0.5.4
-tk==0.1.0
+PyQt5==5.15.11
+PyQt5-Qt5==5.15.16
+PyQt5_sip==12.17.0
 ```
 
 ---

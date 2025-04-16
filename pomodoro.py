@@ -1,287 +1,181 @@
-import tkinter as tk
-from tkinter import messagebox
+import sys
 import sqlite3
-import time
-from datetime import datetime
-import threading
+import datetime
 import os
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
+    QMessageBox
+)
+from PyQt5.QtCore import QTimer, Qt
 
-class PomodoroApp:
-    def __init__(self, root):
-        """Initialize the Pomodoro Timer application"""
-        # Setup main window
-        self.root = root
-        self.root.title("Pomodoro Timer")
-        self.root.geometry("500x400")
-        self.root.configure(bg="#2A2A3A")  # Dark theme with blue tint
-        
-        # Timer configuration variables
-        self.focus_time = tk.IntVar(value=60)  # Default 25 minutes (standard Pomodoro)
-        self.rest_time = tk.IntVar(value=10)    # Default 5 minutes rest
-        self.remaining_time = tk.StringVar(value="Ready to start")
-        
-        # Timer state variables
+# Database setup
+db_path = os.path.expanduser("~/.pomodoro/pomodoro.db")
+os.makedirs(os.path.dirname(db_path), exist_ok=True)
+conn = sqlite3.connect(db_path)
+
+cursor = conn.cursor()
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS time_logs (
+        date TEXT PRIMARY KEY,
+        mins INTEGER
+    )
+''')
+conn.commit()
+
+def log_time(mins):
+    today = datetime.date.today().isoformat()
+    cursor.execute("SELECT mins FROM time_logs WHERE date = ?", (today,))
+    row = cursor.fetchone()
+    if row:
+        cursor.execute("UPDATE time_logs SET mins = ? WHERE date = ?", (row[0] + mins, today))
+    else:
+        cursor.execute("INSERT INTO time_logs (date, mins) VALUES (?, ?)", (today, mins))
+    conn.commit()
+
+def get_today_mins():
+    today = datetime.date.today().isoformat()
+    cursor.execute("SELECT mins FROM time_logs WHERE date = ?", (today,))
+    row = cursor.fetchone()
+    return row[0] if row else 0
+
+def get_all_logs():
+    cursor.execute("SELECT date, mins FROM time_logs ORDER BY date")
+    return cursor.fetchall()
+
+FOCUS_MINUTES = 60
+BREAK_MINUTES = 10
+
+class PomodoroApp(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Pomodoro Timer")
+        self.setFixedSize(500, 400)
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #1e1e1e;
+                color: #f0f0f0;
+                font-family: 'Segoe UI', sans-serif;
+            }
+            QLabel {
+                font-size: 20px;
+            }
+            QPushButton {
+                background-color: #2d89ef;
+                color: white;
+                padding: 14px 24px;
+                font-size: 18px;
+                border-radius: 8px;
+            }
+            QPushButton:hover {
+                background-color: #1b6ac9;
+            }
+        """)
+
+        self.mode = "focus"
+        self.time_left = FOCUS_MINUTES * 60
         self.running = False
-        self.is_paused = False
-        self.is_resting = False
-        self.timer_thread = None
-        
-        # Setup database and UI components
-        self.setup_db()
-        self.create_widgets()
-    
-    def setup_db(self):
-        """Create and configure the SQLite database"""
-        self.conn = sqlite3.connect("pomodoro_history.db")
-        self.cursor = self.conn.cursor()
-        self.cursor.execute('''CREATE TABLE IF NOT EXISTS history (
-                                date TEXT,
-                                focus_minutes INTEGER)''')
-        self.conn.commit()
-    
-    def create_widgets(self):
-        """Create and arrange all UI elements"""
-        # Focus time input
-        tk.Label(self.root, text="Focus Time (min):", bg="#1E1E2E", fg="#FFD700", font=("Arial", 14, "bold")).pack(pady=(10, 0))
-        tk.Entry(self.root, textvariable=self.focus_time, font=("Arial", 14), bg="#2E2E3E", fg="white", width=10).pack()
-        
-        # Rest time input
-        tk.Label(self.root, text="Rest Time (min):", bg="#1E1E2E", fg="#FFD700", font=("Arial", 14, "bold")).pack(pady=(10, 0))
-        tk.Entry(self.root, textvariable=self.rest_time, font=("Arial", 14), bg="#2E2E3E", fg="white", width=10).pack()
-        
-        # Control buttons frame
-        button_frame = tk.Frame(self.root, bg="#1E1E2E")
-        button_frame.pack(pady=15)
-        
-        # Start/Pause button
-        self.start_button = tk.Button(
-            button_frame, 
-            text="Start", 
-            command=self.toggle_timer, 
-            bg="#4CAF50", 
-            fg="white", 
-            font=("Arial", 14, "bold"),
-            width=10
-        )
-        self.start_button.grid(row=0, column=0, padx=5)
-        
-        # Stop/Reset button
-        self.stop_button = tk.Button(
-            button_frame, 
-            text="Stop", 
-            command=self.stop_timer, 
-            bg="#f44336", 
-            fg="white", 
-            font=("Arial", 14, "bold"),
-            width=10
-        )
-        self.stop_button.grid(row=0, column=1, padx=5)
-        
-        # History button
-        self.history_button = tk.Button(
-            self.root, 
-            text="Show History", 
-            command=self.show_history, 
-            bg="#2196F3", 
-            fg="white", 
-            font=("Arial", 14, "bold")
-        )
-        self.history_button.pack(pady=5)
-        
-        # Status display
-        self.status_label = tk.Label(
-            self.root, 
-            text="Ready to start", 
-            bg="#1E1E2E", 
-            fg="#FFD700", 
-            font=("Arial", 16, "bold")
-        )
-        self.status_label.pack(pady=10)
-        
-        # Timer display
-        self.timer_label = tk.Label(
-            self.root, 
-            textvariable=self.remaining_time, 
-            bg="#1E1E2E", 
-            fg="#FFA500", 
-            font=("Arial", 24, "bold")
-        )
-        self.timer_label.pack(pady=10)
-    
-    def toggle_timer(self):
-        """Start, pause or resume the timer"""
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.countdown)
+
+        self.mode_label = QLabel(self.get_mode_text(), alignment=Qt.AlignCenter)
+        self.mode_label.setStyleSheet("font-size: 28px; font-weight: bold; margin: 15px 0;")
+
+        self.time_display = QLabel(self.format_time(), alignment=Qt.AlignCenter)
+        self.time_display.setStyleSheet("font-size: 56px; font-weight: bold; margin-bottom: 20px;")
+
+        self.status_label = QLabel(self.get_status_text(), alignment=Qt.AlignCenter)
+        self.status_label.setStyleSheet("font-size: 18px; color: #aaa; margin-bottom: 20px;")
+
+        self.start_btn = QPushButton("▶ Start")
+        self.start_btn.clicked.connect(self.start_timer)
+
+        self.pause_btn = QPushButton("⏸ Pause")
+        self.pause_btn.clicked.connect(self.pause_timer)
+
+        self.reset_btn = QPushButton("⏹ Reset")
+        self.reset_btn.clicked.connect(self.reset_timer)
+
+        self.history_btn = QPushButton("📜 Show History")
+        self.history_btn.clicked.connect(self.show_history)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(20)
+        btn_layout.addWidget(self.start_btn)
+        btn_layout.addWidget(self.pause_btn)
+        btn_layout.addWidget(self.reset_btn)
+
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(20)
+        main_layout.addWidget(self.mode_label)
+        main_layout.addWidget(self.time_display)
+        main_layout.addLayout(btn_layout)
+        main_layout.addWidget(self.history_btn, alignment=Qt.AlignCenter)
+        main_layout.addWidget(self.status_label)
+
+        self.setLayout(main_layout)
+
+    def get_mode_text(self):
+        return "🧠 Focus Time" if self.mode == "focus" else "☕ Break Time"
+
+    def update_mode_label(self):
+        self.mode_label.setText(self.get_mode_text())
+
+    def get_status_text(self):
+        return f"⏱️ Time logged today: {get_today_mins()} minutes"
+
+    def format_time(self):
+        mins, secs = divmod(self.time_left, 60)
+        return f"{mins:02d}:{secs:02d}"
+
+    def start_timer(self):
         if not self.running:
-            # Start or resume timer
             self.running = True
-            
-            # Set button to pause mode
-            self.start_button.config(text="Pause", bg="#FF9800")
-            
-            if self.is_paused:
-                # We're resuming a paused timer
-                self.is_paused = False
-            else:
-                # Starting a new timer
-                if not self.timer_thread or not self.timer_thread.is_alive():
-                    duration = self.focus_time.get() * 60 if not self.is_resting else self.rest_time.get() * 60
-                    self.update_status("Focus Time!" if not self.is_resting else "Break Time!", 
-                                    "#FFD700" if not self.is_resting else "#4CAF50")
-                    self.timer_thread = threading.Thread(target=self.run_timer, args=(duration,))
-                    self.timer_thread.daemon = True  # Thread will terminate when main program ends
-                    self.timer_thread.start()
-        else:
-            # Pause timer
-            self.is_paused = True
-            self.running = False
-            self.start_button.config(text="Resume", bg="#4CAF50")
-    
-    def stop_timer(self):
-        """Stop the timer and reset to initial state"""
+            self.timer.start(1000)
+
+    def pause_timer(self):
         self.running = False
-        self.is_paused = False
-        self.is_resting = False
-        
-        # Reset UI
-        self.remaining_time.set("Ready to start")
-        self.update_status("Timer Stopped", "#f44336")
-        self.start_button.config(text="Start", bg="#4CAF50")
-        
-        # Stop any running timer thread
-        if self.timer_thread and self.timer_thread.is_alive():
-            self.timer_thread = None
-    
-    def run_timer(self, duration):
-        """Run the timer countdown for the specified duration"""
-        # Initial setup
-        if hasattr(self, 'paused_time_remaining'):
-            # If resuming from pause, use the stored remaining time
-            remaining_seconds = self.paused_time_remaining
-            end_time = time.time() + remaining_seconds
-            delattr(self, 'paused_time_remaining')  # Remove the attribute after using it
+        self.timer.stop()
+
+    def reset_timer(self):
+        self.pause_timer()
+        self.mode = "focus"
+        self.time_left = FOCUS_MINUTES * 60
+        self.update_mode_label()
+        self.status_label.setText(self.get_status_text())
+        self.time_display.setText(self.format_time())
+
+    def countdown(self):
+        if self.time_left > 0:
+            self.time_left -= 1
+            self.time_display.setText(self.format_time())
+            if self.mode == "focus" and self.time_left % 60 == 0:
+                log_time(1)
+                self.status_label.setText(self.get_status_text())
         else:
-            # Fresh timer start
-            end_time = time.time() + duration
-        
-        pause_start_time = None
-        
-        while True:  # Changed to infinite loop with explicit exit conditions
-            # Check if timer was stopped
-            if not self.running and not self.is_paused:
-                return
-            
-            # Handle pause state
-            if self.is_paused:
-                if pause_start_time is None:
-                    pause_start_time = time.time()
-                time.sleep(0.1)
-                continue
-            elif pause_start_time is not None:
-                # Resuming from pause - adjust end time
-                pause_duration = time.time() - pause_start_time
-                end_time += pause_duration
-                pause_start_time = None
-                
-            # Calculate remaining time
-            current_time = time.time()
-            remaining_seconds = max(0, int(end_time - current_time))
-            
-            # Update timer display
-            minutes, seconds = divmod(remaining_seconds, 60)
-            self.remaining_time.set(f"{minutes}:{seconds:02d}")
-            
-            # Log focus time every minute
-            if not self.is_resting and remaining_seconds % 60 == 0 and remaining_seconds > 0:
-                self.log_focus_time(1)
-            
-            # Check if timer completed
-            if remaining_seconds <= 0:
-                break
-                
-            time.sleep(0.1)
-        
-        # Timer completed
-        if self.running:
-            self.timer_completed()
-    
-    def timer_completed(self):
-        """Handle timer completion - switch between focus and rest modes"""
-        if self.is_resting:
-            # End of rest period
-            self.is_resting = False
-            self.update_status("Focus Time!", "#FFD700")
-            self.notify_user("Break Over! Time to focus.")
-            
-            # Start focus time
-            if self.running:
-                self.timer_thread = threading.Thread(target=self.run_timer, args=(self.focus_time.get() * 60,))
-                self.timer_thread.daemon = True
-                self.timer_thread.start()
-        else:
-            # End of focus period
-            self.is_resting = True
-            self.update_status("Break Time!", "#4CAF50")
-            self.notify_user("Focus Time Over! Take a break.")
-            
-            # Start rest time
-            if self.running:
-                self.timer_thread = threading.Thread(target=self.run_timer, args=(self.rest_time.get() * 60,))
-                self.timer_thread.daemon = True
-                self.timer_thread.start()
-    
-    def notify_user(self, message):
-        """Send notification to user when timer completes"""
-        # Show GUI notification
-        messagebox.showinfo("Pomodoro", message)
-        
-        # Send system notification on Linux
-        if os.name == "posix":
-            os.system(f'notify-send "Pomodoro" "{message}"')
-    
-    def update_status(self, text, color):
-        """Update the status display"""
-        self.status_label.config(text=text, fg=color)
-    
-    def log_focus_time(self, minutes):
-        """Record completed focus time to database"""
-        today = datetime.today().strftime('%Y-%m-%d')
-        
-        # Create a new connection to avoid thread issues
-        conn = sqlite3.connect("pomodoro_history.db")
-        cursor = conn.cursor()
-        
-        # Check if today already has an entry
-        cursor.execute("SELECT focus_minutes FROM history WHERE date = ?", (today,))
-        result = cursor.fetchone()
-        
-        # Update or insert record
-        if result:
-            total_minutes = result[0] + minutes
-            cursor.execute("UPDATE history SET focus_minutes = ? WHERE date = ?", (total_minutes, today))
-        else:
-            cursor.execute("INSERT INTO history (date, focus_minutes) VALUES (?, ?)", (today, minutes))
-        
-        conn.commit()
-        conn.close()
-    
+            self.pause_timer()
+            if self.mode == "focus":
+                log_time(self.time_left // 60)
+                self.mode = "break"
+                self.time_left = BREAK_MINUTES * 60
+                QMessageBox.information(self, "Focus Complete", "Time for a break!")
+            else:
+                self.mode = "focus"
+                self.time_left = FOCUS_MINUTES * 60
+                QMessageBox.information(self, "Break Over", "Let's get back to work!")
+
+            self.update_mode_label()
+            self.time_display.setText(self.format_time())
+            self.status_label.setText(self.get_status_text())
+
     def show_history(self):
-        """Display focus time history"""
-        self.cursor.execute("SELECT date, focus_minutes FROM history ORDER BY date DESC")
-        records = self.cursor.fetchall()
-        
-        if records:
-            # Format history data for display
-            history_text = "Your Pomodoro History:\n\n" + "\n".join([f"{date}: {minutes} minutes" for date, minutes in records])
-        else:
-            history_text = "No history found. Complete some focus sessions first!"
-            
-        messagebox.showinfo("Pomodoro History", history_text)
-    
-    def __del__(self):
-        """Clean up database connection when app closes"""
-        if hasattr(self, 'conn'):
-            self.conn.close()
+        logs = get_all_logs()
+        history_msg = "\n".join([f"{date}: {mins} minutes" for date, mins in logs])
+        QMessageBox.information(self, "History", history_msg or "No history available.")
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = PomodoroApp(root)
-    root.mainloop()
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    window = PomodoroApp()
+    window.show()
+    sys.exit(app.exec_())
